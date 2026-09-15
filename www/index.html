@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>min</title>
+<pre id="out">booting</pre>
+<script>
+const out = document.getElementById("out");
+const w = new Worker("min.js");
+w.onmessage = (e) => {
+  const m = e.data || {};
+  if (m.t === "ready") out.textContent = JSON.stringify(m);
+  else if (m.t === "out") out.textContent = m.out;
+  else if (m.t === "err") out.textContent = "err " + m.e;
+};
+w.postMessage({ t: "boot" });
+window.min_run = (job) => w.postMessage({ t: "run", job });
+</script>

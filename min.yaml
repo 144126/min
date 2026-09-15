@@ -1,0 +1,7 @@
+url: https://opencode.ai/zen/v1
+model: muse-spark-1.3-contributor-free
+exec: https://ver.apexlinks.org/api/search
+agents.md: agents.md
+tools: tools.json
+keep: 9
+window: 1000000

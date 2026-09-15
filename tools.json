@@ -1,0 +1,19 @@
+[
+  {
+    "type": "function",
+    "method": "GET",
+    "function": {
+      "name": "search_verses",
+      "description": "semantic bible verse search",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": { "type": "string", "description": "what to find" },
+          "b": { "type": "string", "description": "book name, optional" },
+          "x": { "type": "string", "description": "chapter number, optional" }
+        },
+        "required": ["q"]
+      }
+    }
+  }
+]
