@@ -304,15 +304,39 @@ struct Cfg {
     exec_headers: Vec<(String, String)>,
 }
 
+fn pull_user(
+    inbox: &mut impl FnMut() -> Vec<String>,
+    messages: &mut Vec<Msg>,
+    emit: &mut impl FnMut(&Value) -> Result<(), String>,
+) -> Result<bool, String> {
+    let q = inbox();
+    if q.is_empty() {
+        return Ok(false);
+    }
+    for p in q {
+        emit(&json!({"t": "user", "x": p}))?;
+        messages.push(Msg {
+            role: "user".into(),
+            content: Some(Value::String(p)),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+    Ok(true)
+}
+
 fn turn(
     cfg: &Cfg,
     agent: &ureq::Agent,
     messages: &mut Vec<Msg>,
     pin: usize,
     extra: &[(String, String)],
+    emit: &mut impl FnMut(&Value) -> Result<(), String>,
+    inbox: &mut impl FnMut() -> Vec<String>,
 ) -> Result<String, String> {
     let endpoint = chat_url(&cfg.url);
     let mut used: Option<u64> = None;
+    let mut last = String::new();
     for _ in 0..cfg.steps {
         let fat = match used {
             Some(t) => t > cfg.budget,
@@ -339,8 +363,7 @@ fn turn(
         let mut resp = match req.send_json(&body) {
             Ok(r) => r,
             Err(e) => {
-                let extra = e
-                    .to_string();
+                let extra = e.to_string();
                 log_line(cfg.log.as_deref(), &format!("chat fail {extra}"));
                 return Err(format!("chat: {extra}"));
             }
@@ -362,6 +385,11 @@ fn turn(
             cfg.log.as_deref(),
             &format!("chat finish={finish} used={used:?} {msg}"),
         );
+        if let Some(t) = msg.get("reasoning_content").and_then(|x| x.as_str()) {
+            if !t.is_empty() {
+                emit(&json!({"t": "think", "x": t}))?;
+            }
+        }
         if finish == "tool_calls" || has_tools {
             let calls = tool_calls.as_array().cloned().unwrap_or_default();
             messages.push(Msg {
@@ -378,11 +406,13 @@ fn turn(
                     Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})),
                     other => other,
                 };
+                emit(&json!({"t": "call", "n": name, "a": args}))?;
                 let out = run_tool(&cfg.exec, cfg.specs.get(name), &args, extra);
                 log_line(
                     cfg.log.as_deref(),
                     &format!("tool {name} {args} -> {out}"),
                 );
+                emit(&json!({"t": "out", "n": name, "x": out}))?;
                 messages.push(Msg {
                     role: "tool".into(),
                     content: Some(Value::String(out)),
@@ -390,11 +420,23 @@ fn turn(
                     tool_call_id: Some(id.into()),
                 });
             }
+            let _ = pull_user(inbox, messages, emit)?;
             continue;
         }
         let final_txt = msg["content"].as_str().unwrap_or("").to_string();
         log_line(cfg.log.as_deref(), &format!("out {final_txt}"));
-        return Ok(final_txt);
+        last = final_txt.clone();
+        emit(&json!({"t": "say", "x": final_txt}))?;
+        messages.push(Msg {
+            role: "assistant".into(),
+            content: msg.get("content").cloned(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        if pull_user(inbox, messages, emit)? {
+            continue;
+        }
+        return Ok(last);
     }
     Err("step limit".into())
 }
@@ -535,7 +577,15 @@ fn main() {
         tool_call_id: None,
     });
     let pin = messages.len();
-    match turn(&cfg, &agent, &mut messages, pin, &cfg.exec_headers) {
+    match turn(
+        &cfg,
+        &agent,
+        &mut messages,
+        pin,
+        &cfg.exec_headers,
+        &mut |_| Ok(()),
+        &mut || Vec::new(),
+    ) {
         Ok(s) => println!("{s}"),
         Err(e) => die(&e),
     }
@@ -551,7 +601,7 @@ fn serve(cfg: Cfg, agent: ureq::Agent, addr: &str) {
         .unwrap_or(4);
     let (tx, rx) = mpsc::sync_channel::<tiny_http::Request>(n * 4);
     let rx = Arc::new(Mutex::new(rx));
-    let sessions: Arc<Mutex<HashMap<String, Vec<Msg>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: Arc<Mutex<HashMap<String, Sess>>> = Arc::new(Mutex::new(HashMap::new()));
     let cfg = Arc::new(cfg);
     let agent = Arc::new(agent);
     for _ in 0..n {
@@ -614,10 +664,16 @@ fn listen_binds(addr: &str) -> Vec<String> {
     vec![addr.to_string()]
 }
 
+struct Sess {
+    messages: Vec<Msg>,
+    inbox: Vec<String>,
+    busy: bool,
+}
+
 fn handle(
     cfg: &Cfg,
     agent: &ureq::Agent,
-    sessions: &std::sync::Mutex<std::collections::HashMap<String, Vec<Msg>>>,
+    sessions: &std::sync::Mutex<std::collections::HashMap<String, Sess>>,
     mut req: tiny_http::Request,
 ) {
     let mut raw = String::new();
@@ -663,9 +719,9 @@ fn handle(
             }
         }
     }
-    let mut messages = {
+    let queued = {
         let mut g = sessions.lock().unwrap();
-        g.remove(&session).unwrap_or_else(|| {
+        let s = g.entry(session.clone()).or_insert_with(|| {
             let mut m = Vec::new();
             if let Some(p) = &cfg.inst {
                 m.push(Msg {
@@ -675,8 +731,35 @@ fn handle(
                     tool_call_id: None,
                 });
             }
-            m
-        })
+            Sess {
+                messages: m,
+                inbox: Vec::new(),
+                busy: false,
+            }
+        });
+        if s.busy {
+            s.inbox.push(prompt.clone());
+            true
+        } else {
+            s.busy = true;
+            false
+        }
+    };
+    if queued {
+        log_line(cfg.log.as_deref(), &format!("session {session} queue {prompt}"));
+        let body = json!({"s": session, "q": true}).to_string();
+        let _ = req.respond(
+            tiny_http::Response::from_string(body)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                ),
+        );
+        return;
+    }
+    let mut messages = {
+        let mut g = sessions.lock().unwrap();
+        g.get_mut(&session).map(|s| std::mem::take(&mut s.messages)).unwrap_or_default()
     };
     let pin = if messages.first().map(|m| m.role.as_str()) == Some("system") {
         2
@@ -691,21 +774,56 @@ fn handle(
         tool_call_id: None,
     });
     let pin = pin.min(messages.len());
-    let out = match turn(cfg, agent, &mut messages, pin, &extra) {
-        Ok(s) => s,
-        Err(e) => {
-            sessions.lock().unwrap().insert(session.clone(), messages);
-            let _ = req.respond(
-                tiny_http::Response::from_string(json!({"session": session, "error": e}).to_string())
-                    .with_status_code(502),
-            );
-            return;
-        }
-    };
-    sessions.lock().unwrap().insert(session.clone(), messages);
-    let body = json!({"session": session, "out": out}).to_string();
-    let _ = req.respond(
-        tiny_http::Response::from_string(body)
-            .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()),
+    let mut w = req.into_writer();
+    let _ = write!(
+        w,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n",
     );
+    let mut chunk = |line: &str| -> Result<(), String> {
+        write!(w, "{:x}\r\n{line}\r\n", line.len()).map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())
+    };
+    let start = format!("{}\n", json!({"s": session}));
+    if let Err(e) = chunk(&start) {
+        let mut g = sessions.lock().unwrap();
+        if let Some(s) = g.get_mut(&session) {
+            s.messages = messages;
+            s.busy = false;
+        }
+        let _ = e;
+        return;
+    }
+    let sid = session.clone();
+    let mut emit = |v: &Value| {
+        let line = format!("{v}\n");
+        chunk(&line)
+    };
+    let mut take_inbox = || {
+        let mut g = sessions.lock().unwrap();
+        g.get_mut(&sid)
+            .map(|s| std::mem::take(&mut s.inbox))
+            .unwrap_or_default()
+    };
+    loop {
+        let out = turn(cfg, agent, &mut messages, pin, &extra, &mut emit, &mut take_inbox);
+        match out {
+            Err(e) => {
+                let _ = emit(&json!({"t": "err", "x": e}));
+                break;
+            }
+            Ok(_) => {
+                if !pull_user(&mut take_inbox, &mut messages, &mut emit).unwrap_or(false) {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = write!(w, "0\r\n\r\n");
+    let _ = w.flush();
+    drop(w);
+    let mut g = sessions.lock().unwrap();
+    if let Some(s) = g.get_mut(&session) {
+        s.messages = messages;
+        s.busy = false;
+    }
 }
