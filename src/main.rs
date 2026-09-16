@@ -301,7 +301,6 @@ struct Cfg {
     specs: Map<String, Value>,
     inst: Option<String>,
     listen: Option<String>,
-    cookie: Option<String>,
     exec_headers: Vec<(String, String)>,
 }
 
@@ -310,6 +309,7 @@ fn turn(
     agent: &ureq::Agent,
     messages: &mut Vec<Msg>,
     pin: usize,
+    extra: &[(String, String)],
 ) -> Result<String, String> {
     let endpoint = chat_url(&cfg.url);
     let mut used: Option<u64> = None;
@@ -378,7 +378,7 @@ fn turn(
                     Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})),
                     other => other,
                 };
-                let out = run_tool(&cfg.exec, cfg.specs.get(name), &args, &cfg.exec_headers);
+                let out = run_tool(&cfg.exec, cfg.specs.get(name), &args, extra);
                 log_line(
                     cfg.log.as_deref(),
                     &format!("tool {name} {args} -> {out}"),
@@ -424,11 +424,6 @@ fn send(pin: usize, keep: usize, msgs: &[Msg]) -> Vec<Msg> {
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut cfg_path = "min.yaml".to_string();
-    let mut i_cli: Option<String> = None;
-    let mut t_cli: Option<Value> = None;
-    let mut exec_cli: Option<String> = None;
-    let mut log_cli: Option<String> = None;
-    let mut listen_cli: Option<String> = None;
     let mut prompt: Vec<String> = Vec::new();
     let mut n = 0;
     while n < args.len() {
@@ -437,34 +432,8 @@ fn main() {
                 n += 1;
                 cfg_path = args.get(n).cloned().unwrap_or_else(|| die("-c needs a file"));
             }
-            "-i" => {
-                n += 1;
-                i_cli = Some(args.get(n).cloned().unwrap_or_else(|| die("-i needs a file")));
-            }
-            "-t" => {
-                n += 1;
-                t_cli = Some(Value::String(
-                    args.get(n).cloned().unwrap_or_else(|| die("-t needs a file")),
-                ));
-            }
-            "--exec" => {
-                n += 1;
-                exec_cli = Some(args.get(n).cloned().unwrap_or_else(|| die("--exec needs a url")));
-            }
-            "-l" => {
-                n += 1;
-                log_cli = Some(args.get(n).cloned().unwrap_or_else(|| die("-l needs a file")));
-            }
-            "--listen" => {
-                n += 1;
-                listen_cli = Some(
-                    args.get(n)
-                        .cloned()
-                        .unwrap_or_else(|| die("--listen needs host:port")),
-                );
-            }
             "-h" | "--help" => {
-                eprintln!("min [-c min.yaml] [-i agents.md] [-t tools.json] [-l min.log] [--listen host:port] [prompt]");
+                eprintln!("min [-c min.yaml] [prompt]");
                 process::exit(0);
             }
             s if s.starts_with('-') => die(&format!("unknown flag {s}")),
@@ -509,16 +478,12 @@ fn main() {
     let budget = take(&mut map, "budget")
         .and_then(|v| v.as_u64())
         .unwrap_or(window * 54 / 100);
-    let exec = exec_cli
-        .or_else(|| take_str(&mut map, "exec"))
-        .unwrap_or_else(|| die("config needs exec"));
-    let log_path = log_cli.or_else(|| take_str(&mut map, "log"));
-    let listen = listen_cli.or_else(|| take_str(&mut map, "listen"));
-    let inst = i_cli
-        .or_else(|| take_str(&mut map, "agents.md"))
-        .or_else(|| take_str(&mut map, "agents"));
+    let exec = take_str(&mut map, "exec").unwrap_or_else(|| die("config needs exec"));
+    let log_path = take_str(&mut map, "log");
+    let listen = take_str(&mut map, "listen");
+    let inst = take_str(&mut map, "agents.md").or_else(|| take_str(&mut map, "agents"));
     let mut specs = Map::new();
-    if let Some(t) = t_cli.or_else(|| take(&mut map, "tools")) {
+    if let Some(t) = take(&mut map, "tools") {
         let (cleaned, s) = load_tools(t);
         specs = s;
         map.insert("tools".into(), cleaned);
@@ -542,7 +507,6 @@ fn main() {
         specs,
         inst,
         listen,
-        cookie: None,
         exec_headers,
     };
     let agent = ureq::Agent::new_with_defaults();
@@ -552,7 +516,7 @@ fn main() {
         return;
     }
     if prompt.is_empty() {
-        die("usage: min [-c min.yaml] [-i agents.md] [-t tools.json] [-l min.log] [--listen host:port] [prompt]");
+        die("usage: min [-c min.yaml] [prompt]");
     }
     let mut messages: Vec<Msg> = Vec::new();
     if let Some(p) = &cfg.inst {
@@ -571,7 +535,7 @@ fn main() {
         tool_call_id: None,
     });
     let pin = messages.len();
-    match turn(&cfg, &agent, &mut messages, pin) {
+    match turn(&cfg, &agent, &mut messages, pin, &cfg.exec_headers) {
         Ok(s) => println!("{s}"),
         Err(e) => die(&e),
     }
@@ -689,12 +653,10 @@ fn handle(
     if session.is_empty() {
         session = new_session();
     }
-    let cookie = v.get("cookie").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let mut job = cfg.clone();
-    job.cookie = cookie.clone();
-    if let Some(c) = cookie {
+    let mut extra = cfg.exec_headers.clone();
+    if let Some(c) = v.get("cookie").and_then(|x| x.as_str()) {
         if !c.is_empty() {
-            job.exec_headers.insert(0, ("Cookie".into(), c));
+            extra.push(("Cookie".into(), c.to_string()));
         }
     }
     let mut messages = {
@@ -725,7 +687,7 @@ fn handle(
         tool_call_id: None,
     });
     let pin = pin.min(messages.len());
-    let out = match turn(&job, agent, &mut messages, pin) {
+    let out = match turn(cfg, agent, &mut messages, pin, &extra) {
         Ok(s) => s,
         Err(e) => {
             sessions.lock().unwrap().insert(session.clone(), messages);
