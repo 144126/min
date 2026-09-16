@@ -654,9 +654,13 @@ fn handle(
         session = new_session();
     }
     let mut extra = cfg.exec_headers.clone();
-    if let Some(c) = v.get("cookie").and_then(|x| x.as_str()) {
-        if !c.is_empty() {
-            extra.push(("Cookie".into(), c.to_string()));
+    if let Some(o) = v.get("headers").and_then(|x| x.as_object()) {
+        for (k, val) in o {
+            if let Some(s) = val.as_str() {
+                if !s.is_empty() {
+                    extra.push((k.clone(), s.to_string()));
+                }
+            }
         }
     }
     let mut messages = {
