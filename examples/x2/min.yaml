@@ -1,0 +1,11 @@
+url: https://inference.baseten.co/v1
+model: zai-org/GLM-5.3-Flash
+headers:
+  Authorization: Bearer $BASETEN_API_KEY
+exec: http://localhost:7227
+agents.md: /home/ed/min/examples/x2/agents.md
+tools: /home/ed/min/examples/x2/tools.json
+keep: 9
+window: 1000000
+listen: 127.0.0.1:9090
+log: /home/ed/min/examples/x2/min.log

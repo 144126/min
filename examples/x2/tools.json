@@ -1,0 +1,50 @@
+[
+  {
+    "type": "function",
+    "method": "POST",
+    "url": "/api/profile",
+    "function": {
+      "name": "change_username",
+      "description": "set the signed-in user's username",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string", "description": "new username" }
+        },
+        "required": ["username"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "method": "POST",
+    "url": "/api/profile",
+    "function": {
+      "name": "change_picture",
+      "description": "set the signed-in user's profile picture to an image url",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "picture": { "type": "string", "description": "https image url" }
+        },
+        "required": ["picture"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "method": "POST",
+    "url": "/api/posts",
+    "function": {
+      "name": "new_post",
+      "description": "publish a new board post as the signed-in user",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "string", "description": "post body" }
+        },
+        "required": ["x"]
+      }
+    }
+  }
+]
