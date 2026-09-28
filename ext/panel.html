@@ -13,6 +13,8 @@ body { display: flex; flex-direction: column; background: var(--bg); color: var(
 .m { max-width: 92%; white-space: pre-wrap }
 .s { color: var(--mu); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .live { animation: p 1.2s ease-in-out infinite }
+.t { color: var(--mu); font-size: 12px; font-style: italic; white-space: pre-wrap; border-left: 2px solid var(--li); padding-left: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer }
+.t.open { display: block }
 @keyframes p { 50% { opacity: .35 } }
 .hint { color: var(--mu); margin: auto }
 footer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--li) }

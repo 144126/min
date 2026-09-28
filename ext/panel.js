@@ -181,30 +181,92 @@ function view(i) {
   at = i
 }
 
+const said = (x) => [x.reasoning_content, x.reasoning, x.thinking, ...(x.reasoning_details || []).map((r) => r.text || r.summary)].filter((v) => typeof v === "string").join("")
+
+function think() {
+  let p = null, reason = "", text = ""
+  const show = (full) => {
+    if (!full) { p?.remove(); p = null; return }
+    p ||= add("t open", "")
+    p.textContent = full
+    log.append(live)
+    log.scrollTop = log.scrollHeight
+  }
+  return {
+    set(r, t) { reason = r; text = t; const f = [r, t].filter(Boolean).join("\n").trim(); show(f.length > 400 ? "…" + f.slice(-400) : f) },
+    done(answer) {
+      show([reason, answer ? "" : text].filter(Boolean).join("\n").trim())
+      if (p) { p.classList.remove("open"); p.onclick = () => p.classList.toggle("open") }
+    },
+    drop() { p?.remove() },
+  }
+}
+
+async function once(url, headers, body, t) {
+  const r = await fetch(url, { method: "POST", headers, body, signal: ctl.signal })
+  if (!r.ok) { const b = await r.text(); return { status: r.status, why: `${r.status} ${b.slice(0, 200)}`, body: b } }
+  if (!(r.headers.get("content-type") || "").includes("event-stream")) {
+    const d = await r.json().catch(() => null)
+    const m = d?.choices?.[0]?.message
+    if (!m) return { fatal: d?.error?.message || "the model sent an empty or broken reply" }
+    t.set(said(m), m.content || "")
+    return { m }
+  }
+  const rd = r.body.getReader(), dec = new TextDecoder()
+  let buf = "", reason = "", content = ""
+  const calls = []
+  for (;;) {
+    const { done, value } = await rd.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    for (let n; (n = buf.indexOf("\n")) >= 0; ) {
+      const line = buf.slice(0, n).trim()
+      buf = buf.slice(n + 1)
+      if (!line.startsWith("data:") || line === "data: [DONE]") continue
+      let d
+      try { d = JSON.parse(line.slice(5)) } catch { continue }
+      if (d.error) return { fatal: d.error.message || JSON.stringify(d.error) }
+      const x = d.choices?.[0]?.delta
+      if (!x) continue
+      reason += said(x)
+      content += x.content || ""
+      for (const c of x.tool_calls || []) {
+        const o = (calls[c.index ?? calls.length] ||= { id: "", type: "function", function: { name: "", arguments: "" } })
+        if (c.id) o.id = c.id
+        if (c.function?.name) o.function.name += c.function.name
+        if (c.function?.arguments) o.function.arguments += typeof c.function.arguments === "string" ? c.function.arguments : JSON.stringify(c.function.arguments)
+      }
+      t.set(reason, content)
+    }
+  }
+  return { m: { content, tool_calls: calls.filter(Boolean) } }
+}
+
+let flow = true
 async function llm() {
   const url = cfg.url.replace(/\/+$/, "") + "/chat/completions"
   const headers = { "Content-Type": "application/json", ...(cfg.key && { Authorization: "Bearer " + cfg.key }) }
-  const body = JSON.stringify({ model: cfg.model, messages: [{ role: "system", content: SYSTEM }, ...hist], tools: TOOLS, ...extra })
+  const req = { model: cfg.model, messages: [{ role: "system", content: SYSTEM }, ...hist], tools: TOOLS, ...extra }
   let why = ""
   for (let i = 0; i < 10; i++) {
     if (stop) throw new Error("stopped")
     live.textContent = i ? `the model is busy, retrying (${i})` : "thinking"
-    let r
-    try { r = await fetch(url, { method: "POST", headers, body, signal: ctl.signal }) } catch (e) {
-      if (stop) throw new Error("stopped")
-      why = e.message
-      await sleep(Math.min(8000, 500 * 2 ** i))
-      continue
+    const t = think()
+    let res
+    try { res = await once(url, headers, JSON.stringify(flow ? { ...req, stream: true } : req), t) } catch (e) {
+      if (stop) { t.done(); throw new Error("stopped") }
+      res = { why: e.message }
     }
-    const t = await r.text()
-    if (r.ok) {
-      let d
-      try { d = JSON.parse(t) } catch { throw new Error("the model sent something that is not json: " + t.slice(0, 200)) }
-      if (d.choices?.[0]?.message) return d.choices[0].message
-      throw new Error((d.error?.message || t).slice(0, 300))
+    if (res.m) {
+      const tools = (res.m.tool_calls || []).length > 0
+      t.done(!tools)
+      return res.m
     }
-    why = `${r.status} ${t.slice(0, 200)}`
-    if (r.status !== 429 && r.status < 500) throw new Error(why)
+    t.drop()
+    if (res.fatal) throw new Error(res.fatal.slice(0, 300))
+    why = res.why
+    if (flow && res.status === 400 && /stream/i.test(res.body || "")) { flow = false; i--; continue }
+    if (res.status && res.status !== 429 && res.status < 500) throw new Error(why)
     await sleep(Math.min(8000, 500 * 2 ** i))
   }
   throw new Error("the model did not answer after 10 tries: " + why)
