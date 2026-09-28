@@ -337,7 +337,9 @@ fn turn(
     let endpoint = chat_url(&cfg.url);
     let mut used: Option<u64> = None;
     let mut last = String::new();
-    for _ in 0..cfg.steps {
+    let mut n = 0;
+    while cfg.steps == 0 || n < cfg.steps {
+        n += 1;
         let fat = match used {
             Some(t) => t > cfg.budget,
             None => chars(messages) as u64 > cfg.budget * 3 / 4,
@@ -510,7 +512,7 @@ fn main() {
     };
     let steps = take(&mut map, "steps")
         .and_then(|v| v.as_u64())
-        .unwrap_or(27);
+        .unwrap_or(0);
     let keep = take(&mut map, "keep")
         .and_then(|v| v.as_u64())
         .unwrap_or(9) as usize;

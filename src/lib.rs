@@ -211,7 +211,7 @@ pub extern "C" fn min_run(p: u32, n: u32) -> u64 {
     let exec = job.get("exec").and_then(|v| v.as_str()).unwrap_or("");
     let inst = job.get("agents").and_then(|v| v.as_str()).unwrap_or("");
     let prompt = job.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-    let steps = job.get("steps").and_then(|v| v.as_u64()).unwrap_or(27);
+    let steps = job.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
     let keep = job.get("keep").and_then(|v| v.as_u64()).unwrap_or(9) as usize;
     let window = job.get("window").and_then(|v| v.as_u64()).unwrap_or(1_000_000);
     let budget = job
@@ -244,7 +244,9 @@ pub extern "C" fn min_run(p: u32, n: u32) -> u64 {
     if !matches!(tools, Value::Null) {
         extra.insert("tools".into(), tools);
     }
-    for _ in 0..steps {
+    let mut n = 0;
+    while steps == 0 || n < steps {
+        n += 1;
         let fat = match used {
             Some(t) => t > budget,
             None => {
